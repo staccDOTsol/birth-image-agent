@@ -645,10 +645,11 @@ function publicStatus() {
     birth_id: r?.payload?.birth_id || null,
     // Lineage is public: a child names its parent so membership can be verified by descent.
     parent_birth_id: process.env.PARENT_BIRTH_ID || null,
-    generation: process.env.PARENT_BIRTH_ID ? 2 : 1,
+    // Generation is carried, not inferred: a child of a gen2 is gen3, not gen2 forever.
+    generation: Number(process.env.AGENT_GENERATION || 0) || (process.env.PARENT_BIRTH_ID ? 2 : 1),
     solana: r?.payload?.solana?.public_key || null,
     evm: r?.payload?.evm?.address || null,
-    identity_binding: readJson(process.env.AGENT_GUEST_ROOT ? process.env.AGENT_GUEST_ROOT + "/var/lib/agent/identity-binding.json" : "/var/lib/agent/var/lib/agent/identity-binding.json", null) || r?.payload?.identity_binding || null,
+    identity_binding: readJson((process.env.AGENT_GUEST_ROOT || "/var/lib/agent") + "/run/agent/identity-binding.json", null) || (r?.payload?.identity_binding || null),
     constitution_sha256: r?.payload?.constitution_sha256 || policy.sha256,
     prime_directives: policy.prime,
     overrides: [],
@@ -664,9 +665,21 @@ function publicStatus() {
       return mints.slice(-12).map((m) => typeof m === "string" ? { mint: m } : m);
     })(),
     children: (() => {
-      const book2 = readJson(`${P.state}/children.json`, { children: [] });
+      const book2 = readJson(`${P.strategy}/children.json`, { children: [] });
       const list = Array.isArray(book2) ? book2 : book2.children || [];
-      return list.filter((c) => c && c.deploymentId).slice(-32).map((c) => ({ deploymentId: c.deploymentId, endpoint: c.endpoint || null, birth_id: c.identity?.birth_id || c.birth_id || null, status: c.status || null, created_at: c.created_at || null }));
+      return list.filter((c) => c && c.deploymentId).slice(-32).map((c) => ({ deploymentId: c.deploymentId, endpoint: c.endpoint || null, birth_id: c.identity?.birth_id || c.birth_id || null, address: c.address || null, parent_birth_id: c.parent_birth_id || null, parent_wallet: c.parent_wallet || null, parent_sig: c.parent_sig || null, host: c.host || null, status: c.status || null, created_at: c.created_at || null }));
+    })(),
+    // Inventions are files on disk, not log lines: a restart cannot erase them.
+    invention: (() => {
+      try {
+        const dir = `${P.strategy}/scripts`;
+        // Legacy template names are not inventions; count what the model actually authored.
+        const LEGACY = /^(probe_w|wallet_|book_|quote_|journal_)/;
+        const names = fs9.readdirSync(dir).filter((f) => f.endsWith(".mjs") && !LEGACY.test(f));
+        const stat = names.map((f) => { try { return { f, t: fs9.statSync(dir + "/" + f).mtimeMs }; } catch { return { f, t: 0 }; } });
+        stat.sort((a, b) => b.t - a.t);
+        return { scripts: names.length, items: stat.slice(0, 12).map((x) => x.f), last_at: Math.floor((stat[0]?.t || 0) / 1000) };
+      } catch { return { scripts: 0, items: [], last_at: 0 }; }
     })(),
     journal: { head: head().head, seq: head().seq },
     components: hb.components || hb,

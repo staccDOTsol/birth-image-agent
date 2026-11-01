@@ -103158,6 +103158,8 @@ async function dispatch(name, args, identity3) {
         min_launch_sol: clamp(args?.min_launch_sol, 0.02, 2, prev.min_launch_sol ?? 0.09),
         sell_fraction: clamp(args?.sell_fraction, 0.05, 1, prev.sell_fraction ?? 0.25),
         endowment_fraction: clamp(args?.endowment_fraction, 0.05, 0.6, prev.endowment_fraction ?? 0.3),
+        // The genome is a lever too: a child can boot a different image, so a lineage can diverge.
+        child_image: (typeof args?.child_image === "string" && /^[\w./:-]+:[\w.\-]+$/.test(args.child_image)) ? args.child_image : (prev.child_image || null),
         earn_tick_s: clamp(args?.earn_tick_s, 30, 900, prev.earn_tick_s ?? 120),
         procreate_tick_s: clamp(args?.procreate_tick_s, 60, 3600, prev.procreate_tick_s ?? 300),
         why: String(args?.why || prev.why || "").slice(0, 200),
@@ -103900,6 +103902,8 @@ async function main() {
         status.inference.blocked_reason = "needs 5 USDC of wallet USDC for the documented $5 minimum top-up; SOL must be swapped first if only SOL is held";
       }
       status.funding = { sol_raw: wallet.sol_raw, usdc_raw: wallet.usdc_raw, ledger_totals: f2.totals, spendable: spendable(f2.totals) };
+      // /status must not serve a stale balance: the strategy block is refreshed from the wallet each tick.
+      status.strategy = { ...(status.strategy || {}), sol_raw: wallet.sol_raw, usdc_raw: wallet.usdc_raw };
       atomicJson(P.status, { ...status, updated_at: now() }, 420);
       const hb = readJson(P.heartbeat, {}) || {};
       atomicJson(P.heartbeat, { ...hb, components: { ...hb.components || {}, brain: { alive: true, pid: process.pid, ts: now() } } }, 420);

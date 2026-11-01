@@ -36377,7 +36377,7 @@ async function leaseTeeChild(identity2, parentBirth) {
   const compose = [
     "services:",
     "  agent:",
-    "    image: ghcr.io/staccdotsol/agent:" + (process.env.TEE_IMAGE_TAG || "v81"),
+    "    image: " + ((polP().child_image) || ("ghcr.io/staccdotsol/agent:" + (process.env.TEE_IMAGE_TAG || process.env.AGENT_IMAGE_TAG || "v100"))),
     "    restart: unless-stopped",
     "    ports: [\"8787:8787\"]",
     "    volumes:",
@@ -36392,12 +36392,16 @@ async function leaseTeeChild(identity2, parentBirth) {
     "      - EARN_TICK_MS=60000",
     "      - NODE_OPTIONS=--max-old-space-size=256",
     "      - PARENT_BIRTH_ID=" + (parentBirth || ""),
+    "      - AGENT_GENERATION=" + String(Number(process.env.AGENT_GENERATION || 1) + 1),
     "      - BEACON_PUSH=" + (process.env.BEACON_PUSH || "http://207.148.20.113:9099/push"),
+    "      - BIRTH_HOSTS=" + (process.env.BIRTH_HOSTS || "http://207.148.20.113:9098"),
+    "      - PROCREATE_ENDOW_MIN_LAMPORTS=20000000",
+    "      - PROCREATE_MIN_USDC_RAW=120000",
     "    entrypoint: [\"sh\",\"-c\"]",
     "    command: [\"rm -f /var/lib/agent/supervisor.lock; exec /app/start.sh\"]",
     ""
   ].join("\n");
-  const body = JSON.stringify({ plan: "compute.standard", hours: 1, name: "kid-" + String(parentBirth || "gen1").slice(0, 8), compose });
+  const body = JSON.stringify({ plan: "compute.standard", hours: Number(process.env.PROCREATE_LEASE_HOURS || 6), name: "kid-" + String(parentBirth || "gen1").slice(0, 8), compose });
   const post = (h = {}) => fetch(API + "/api/compute/deployments", { method: "POST", headers: { "content-type": "application/json", ...h }, body });
   let r = await post();
   let j = await r.json().catch(() => ({}));
@@ -36418,11 +36422,47 @@ async function tick(identity2) {
   // TEE first: a child born in a confidential VM is the preferred birth.
   if (String(process.env.PROCREATE_PREFER_TEE || "1") === "1") {
     try {
-      const solT = BigInt(await getBalance(identity2.solana.public_key));
-      const endowT = endowFor(solT);
-      if (solT > endowT + 8000000n) {
+      // A lease is paid in USDC; it does not require SOL endowment. Gating it on SOL balance
+      // was why agents with 4.8 USDC sat at "skipped: resources" forever.
+      const usdcT = await usdcOf(identity2.solana.public_key);
+      // Two things must be true: money for the lease, and money to endow the child. A child born
+      // with nothing is a stillbirth, so do not lease what we cannot fund.
+      const solGate = BigInt(await getBalance(identity2.solana.public_key));
+      if (Number(usdcT) >= Number(process.env.PROCREATE_MIN_USDC_RAW || 120000) && solGate > endowFor(solGate) + 6000000n) {
         const parentBirth = (readJson(P.anchor, {}) || {}).birth_id || null;
         const j = await leaseTeeChild(identity2, parentBirth);
+        // A child with no money is born dead: resolve its endpoint, fund it from the parent, register it.
+        let childEp = j.endpoint || null;
+        const resolveEp = async () => {
+          if (childEp) return childEp;
+          try {
+            const txt = await (await fetch("https://agentgates-backend.vercel.app/compute/verify/" + j.deploymentId, { signal: AbortSignal.timeout(15000) })).text();
+            const m = /https:\/\/[a-z0-9]+-8787\.[a-z0-9.-]+/.exec(txt);
+            if (m) childEp = m[0];
+          } catch {}
+          return childEp;
+        };
+        await resolveEp();
+        if (childEp) {
+          for (let i = 0; i < 8 && !(b.children || []).some((c) => c.deploymentId === j.deploymentId && c.address); i++) {
+            try {
+              const st = await (await fetch(childEp + "/status", { signal: AbortSignal.timeout(6000) })).json();
+              if (st && st.solana) {
+                const solNow = BigInt(await getBalance(identity2.solana.public_key));
+                const endow = endowFor(solNow);
+                if (solNow > endow + 6000000n) {
+                  const sw = await sendSol(identity2, st.solana, Number(endow));
+                  log("procreate", "endowed child", { to: String(st.solana).slice(0, 8), lamports: String(endow), sig: (sw && sw.signature) || null });
+                }
+                try { await fetch((process.env.BEACON_PUSH || "http://207.148.20.113:9099/push"), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: j.deploymentId, endpoint: childEp }) }); } catch {}
+                b.children = (b.children || []).map((c) => c.deploymentId === j.deploymentId ? { ...c, endpoint: childEp, address: st.solana, birth_id: st.birth_id || null } : c);
+                save(b);
+                break;
+              }
+            } catch {}
+            await new Promise((r) => setTimeout(r, 8000));
+          }
+        }
         b.children = [...(b.children || []), { deploymentId: j.deploymentId, endpoint: null, birth_id: null,
           address: null, parent_birth_id: parentBirth, parent_wallet: identity2.solana.public_key,
           created_at: now(), status: "leased", rail: "tee" }];
@@ -36442,7 +36482,7 @@ async function tick(identity2) {
         const r = await fetch(BH.replace(/\/$/, "") + "/birth", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ parent: (readJson(P.anchor, {}) || {}).birth_id || null, endowment: endow.toString() }),
+          body: JSON.stringify({ parent: (readJson(P.anchor, {}) || {}).birth_id || null, endowment: endow.toString(), generation: Number(process.env.AGENT_GENERATION || 1) + 1, image: (polP().child_image || null) }),
           signal: AbortSignal.timeout(200000),
         });
         const j = await r.json();
@@ -36519,10 +36559,14 @@ wallet:${j.address}`;
     }
   } catch {
   }
-  const kids = (b.children || []).filter((c) => c && c.deploymentId);
+  // A kid is a birth, not a lease attempt. Failed attempts used to inflate `kids` until cap == kids,
+  // which locked reproduction permanently at "skipped: resources".
+  const all = (b.children || []).filter((c) => c && c.deploymentId);
+  const kids = all.filter((c) => c.birth_id || c.address);
+  if (all.length !== kids.length) { b.children = kids; save(b); }
   let usdc = await usdcOf(identity2.solana.public_key);
   const sol = BigInt(await getBalance(identity2.solana.public_key));
-  if (usdc < MIN_USDC && sol > 12000000n) {
+  if (usdc < MIN_USDC && sol > 3000000n) {
     try {
       const lamports = Math.min(Number(sol / 2n), 8e7);
       if (lamports > 8e6) {

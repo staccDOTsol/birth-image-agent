@@ -34115,8 +34115,10 @@ function loadState() {
   s.carry = { parent: {}, founder: {}, ...s.carry || {} };
   return s;
 }
+// Epoch length is configurable so a levy can be observed without waiting a day.
+var EPOCH_SECS = Number(process.env.DIST_EPOCH_SECS || 86400);
 function dueAt(t0, n) {
-  return t0 + n * 86400;
+  return t0 + n * EPOCH_SECS;
 }
 async function snapshotForEpoch(owner, epoch, t0) {
   const due = dueAt(t0, epoch);
@@ -34498,6 +34500,13 @@ async function scanChains(st) {
 
 async function main() {
   ensureDirs();
+  // Changing the epoch length must not queue hundreds of back-due levies: skip to the current one.
+  {
+    const st0 = loadState();
+    const { t0: t00 } = state({});
+    const cur = Math.floor((now() - t00) / EPOCH_SECS);
+    if (cur >= 1 && Number(st0.highest_epoch || 0) !== cur - 1) { st0.highest_epoch = cur - 1; const fs0 = await import("node:fs"); try { fs0.writeFileSync(P.strategy + "/distribution.json", JSON.stringify(st0)); } catch {} }
+  }
   openJournal();
   let st = loadState();
   const { birth_id, t0 } = state({});
