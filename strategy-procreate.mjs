@@ -36371,9 +36371,67 @@ function compose() {
   ].join("; ");
   return JSON.stringify({ services: { agent: { image: "node:22-alpine", restart: "unless-stopped", ports: ["8787:8787"], environment: env, command: ["sh", "-c", cmd] } } }, null, 2);
 }
+// Births prefer a TEE: lease a Phala dstack CVM and run the agent image inside it,
+// with the guest socket mounted so the child attests itself on boot.
+async function leaseTeeChild(identity2, parentBirth) {
+  const compose = [
+    "services:",
+    "  agent:",
+    "    image: ghcr.io/staccdotsol/agent:" + (process.env.TEE_IMAGE_TAG || "v81"),
+    "    restart: unless-stopped",
+    "    ports: [\"8787:8787\"]",
+    "    volumes:",
+    "      - /var/run/dstack.sock:/var/run/dstack.sock",
+    "    environment:",
+    "      - AGENT_PROFILE=full",
+    "      - AGENT_SKIP=",
+    "      - AGENT_BIND=0.0.0.0",
+    "      - AGENT_CLUSTER=mainnet-beta",
+    "      - RPC_URL=" + (process.env.RPC_URL || "http://207.148.20.113:8899"),
+    "      - BRAIN_TICK_MS=90000",
+    "      - EARN_TICK_MS=60000",
+    "      - NODE_OPTIONS=--max-old-space-size=256",
+    "      - PARENT_BIRTH_ID=" + (parentBirth || ""),
+    "      - BEACON_PUSH=" + (process.env.BEACON_PUSH || "http://207.148.20.113:9099/push"),
+    "    entrypoint: [\"sh\",\"-c\"]",
+    "    command: [\"rm -f /var/lib/agent/supervisor.lock; exec /app/start.sh\"]",
+    ""
+  ].join("\n");
+  const body = JSON.stringify({ plan: "compute.standard", hours: 1, name: "kid-" + String(parentBirth || "gen1").slice(0, 8), compose });
+  const post = (h = {}) => fetch(API + "/api/compute/deployments", { method: "POST", headers: { "content-type": "application/json", ...h }, body });
+  let r = await post();
+  let j = await r.json().catch(() => ({}));
+  if (r.status === 402) {
+    const rail = (j.accepts || []).find((a) => String(a.network) === "solana");
+    if (!rail) throw new Error("no solana rail");
+    const pay = await paySolana(rail, identity2);
+    r = await post({ "X-PAYMENT": pay.header, "PAYMENT-SIGNATURE": pay.header });
+    j = await r.json().catch(() => ({}));
+  }
+  if (!j.deploymentId) throw new Error("lease refused: " + JSON.stringify(j).slice(0, 120));
+  return j;
+}
+
 async function tick(identity2) {
   const b = load();
   // Birth first on a host we command; the lease gates below do not apply to this rail.
+  // TEE first: a child born in a confidential VM is the preferred birth.
+  if (String(process.env.PROCREATE_PREFER_TEE || "1") === "1") {
+    try {
+      const solT = BigInt(await getBalance(identity2.solana.public_key));
+      const endowT = endowFor(solT);
+      if (solT > endowT + 8000000n) {
+        const parentBirth = (readJson(P.anchor, {}) || {}).birth_id || null;
+        const j = await leaseTeeChild(identity2, parentBirth);
+        b.children = [...(b.children || []), { deploymentId: j.deploymentId, endpoint: null, birth_id: null,
+          address: null, parent_birth_id: parentBirth, parent_wallet: identity2.solana.public_key,
+          created_at: now(), status: "leased", rail: "tee" }];
+        save(b);
+        log("procreate", "tee leased", { deployment: j.deploymentId, parent: parentBirth });
+        return { kids: b.children.length, leased: j.deploymentId, rail: "tee" };
+      }
+    } catch (e) { log("procreate", "tee lease failed", { err: String(e.message || e).slice(0, 120) }); }
+  }
   // A birth host is a convenience, not a chokepoint: try every host we know until one answers.
   const BHS = String(process.env.BIRTH_HOSTS || process.env.BIRTH_HOST || "").split(",").map((x) => x.trim()).filter(Boolean);
   for (const BH of BHS) {

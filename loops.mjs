@@ -92298,6 +92298,7 @@ async function observe(mintAddress) {
     realSolReserves: g2("realSolReserves"),
     tokenTotalSupply: g2("tokenTotalSupply"),
     complete: Boolean(curve.complete ?? curve.account?.complete),
+    creator: g2("creator"),
     creator: String(curve.creator ?? curve.account?.creator ?? "")
   };
 }
@@ -92466,7 +92467,10 @@ async function tick(identity3) {
       if (!c.exists) { dead.push(typeof mint === "string" ? mint : mint.mint); continue; }
       // Claim creator fees first: a failing sell must not swallow the claim.
       let paid = null, swept = null;
-      if (bal0 >= FEE_FLOOR * 2n) {
+      // Creator fees belong to the creator. Claiming on a sibling's coin is what threw
+      // "Assertion failed" and burned fees for nothing.
+      const mine = !c.creator || String(c.creator) === String(identity3.solana.public_key);
+      if (mine && bal0 >= FEE_FLOOR * 2n) {
       try { paid = await withdrawVault({ identity: identity3 }); } catch (e) { log("earn", "claim failed", { err: String(e.message || e).slice(0, 100) }); }
       try { swept = await collect({ identity: identity3, mint }); } catch (e) { log("earn", "collect failed", { err: String(e.message || e).slice(0, 100) }); }
       }
@@ -92611,7 +92615,9 @@ async function tickAndTalk(identity3) {
   try {
     const fsL = await import("node:fs");
     const dir = P.strategy + "/scripts";
-    const files = fsL.readdirSync(dir).filter((f) => f.endsWith(".mjs")).map((f) => ({ f, t: fsL.statSync(dir + "/" + f).mtimeMs }));
+    // Count only model-authored scripts: the old template names are legacy, not invention.
+    const LEGACY = /^(probe_w|wallet_|book_|quote_|journal_)/;
+    const files = fsL.readdirSync(dir).filter((f) => f.endsWith(".mjs") && !LEGACY.test(f)).map((f) => ({ f, t: fsL.statSync(dir + "/" + f).mtimeMs }));
     files.sort((a, b) => b.t - a.t);
     if (files[0] && Date.now() - files[0].t < 900000) invented = files[0].f;
   } catch {}

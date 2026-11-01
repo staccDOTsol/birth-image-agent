@@ -34144,10 +34144,15 @@ function assessEpoch(st, snap, epoch) {
   const created = [];
   for (const v of byAsset.values()) {
     const B = v.raw;
+    // The tithe is on GROWTH since the last epoch, not on the whole balance: 15% of stock per day
+    // would demand ~18% daily yield and select for extraction over every honest niche.
+    const base = BigInt((st.baseline || {})[v.asset] || 0);
+    const gain = B > base ? B - base : 0n;
+    st.baseline = { ...(st.baseline || {}), [v.asset]: B.toString() };
     for (const role of ["parent", "founder"]) {
       const bps = role === "parent" ? policy.parentBps : policy.founderBps;
       const prior = BigInt(st.carry[role][v.asset] || 0);
-      const { due, carry } = assess(B, prior, bps);
+      const { due, carry } = assess(gain, prior, bps);
       st.carry[role][v.asset] = carry.toString();
       const id = `${st.birth_id}:${epoch}:solana:${v.asset}:${role}`;
       if (st.obligations[id]) continue;

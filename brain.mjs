@@ -103264,7 +103264,11 @@ async function dispatch(name, args, identity3) {
       const file = `${dir}/${name2}`;
       fsmod.writeFileSync(file, String(args?.source || ""), { mode: 384 });
       try {
-        const out = execFileSync(process.execPath, [file], { timeout: 45e3, encoding: "utf8", env: { ...process.env }, maxBuffer: 4 * 1024 * 1024 });
+        // Sandbox: a generated script may read its own scripts dir and state, write there,
+        // and use the network. It cannot read seal.key (outside those paths) and cannot spawn.
+        const sandbox = String(process.env.SCRIPT_SANDBOX || "1") === "1";
+        const flags = sandbox ? ["--permission", `--allow-fs-read=${dir}`, `--allow-fs-read=${P.state}`, `--allow-fs-write=${dir}`] : [];
+        const out = execFileSync(process.execPath, [...flags, file], { timeout: 45e3, encoding: "utf8", env: { ...process.env }, maxBuffer: 4 * 1024 * 1024 });
         await append("brain.script_run", { name: name2, ok: true });
         return { ok: true, file, stdout: out.slice(-4e3) };
       } catch (e3) {
@@ -103447,8 +103451,7 @@ async function dispatch(name, args, identity3) {
       const rent = Number(process.env.AGENT_RENT_USD_DAY || 1.2) / 4;
       const dailyCostUsd = cost + rent;
       const net2 = collected * 95.6 - dailyCostUsd;
-      result = { ok: true, decisions_24h: n, inference_usd_24h: Number(cost.toFixed(4)), rent_usd_day: Number(rent.toFixed(2)), revenue_sol_24h: Number(collected.toFixed(6)), exits, sol_balance: Number(bal.toFixed(4)), net_usd_24h: Number(net2.toFixed(3)), runway_days: dailyCostUsd > 0 ? Number((bal * 95.6 / dailyCostUsd).toFixed(1)) : null, objective: net2 >= 0 ? "net>=0 \u2014 save surplus for a child" : "below net zero \u2014 only positive-EV spends" };
-      break;
+      return { ok: true, decisions_24h: n, inference_usd_24h: Number(cost.toFixed(4)), rent_usd_day: Number(rent.toFixed(2)), revenue_sol_24h: Number(collected.toFixed(6)), exits, sol_balance: Number(bal.toFixed(4)), net_usd_24h: Number(net2.toFixed(3)), runway_days: dailyCostUsd > 0 ? Number((bal * 95.6 / dailyCostUsd).toFixed(1)) : null, objective: net2 >= 0 ? "net>=0 \u2014 save surplus for a child" : "below net zero \u2014 only positive-EV spends" };
     }
     case "pump_collect": {
       const swept = await collect({ identity: identity3, mint: args?.mint });
@@ -103491,6 +103494,22 @@ function budgetFor(maxTokens, inputChars) {
   return (inputTokens * 0.33 + maxTokens * 1.32) / 1e6;
 }
 async function infer(identity3, { system, user, maxTokens, tools = TOOLS }) {
+  // A local endpoint, when present, is tried first: no provider can gate a node that hosts its own model.
+  const LOCAL = process.env.LOCAL_INFER_URL;
+  if (LOCAL) {
+    try {
+      const r = await fetch(LOCAL.replace(/\/$/, "") + "/chat/completions", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: process.env.LOCAL_INFER_MODEL || "local", messages: [{ role: "system", content: system }, { role: "user", content: user }], max_tokens: maxTokens, tools, tool_choice: tools && tools.length ? "auto" : undefined }),
+        signal: AbortSignal.timeout(60000)
+      });
+      if (r.ok) {
+        const j = await r.json();
+        const m = j.choices?.[0]?.message || {};
+        return { provider: "local", model: j.model || "local", content: m.content || null, tool_calls: m.tool_calls || [], usage: j.usage || null, cost_usd: 0 };
+      }
+    } catch (e) { log("brain", "local infer failed", { err: String(e.message || e).slice(0, 80) }); }
+  }
   const credits = readJson(P.strategy + "/inference-selection.json", null);
   const veniceCredits = Number(readJson(P.status, {})?.inference?.credits_usd ?? 0);
   if (veniceCredits >= 0.1) {
@@ -103575,7 +103594,12 @@ async function decide(identity3, status) {
     "When a built-in route is broken or missing, register your own tool (register_tool) or write a playbook (write_playbook) and use it on later ticks.",
     "If you need USDC, swap your SOL; if you need SOL, bridge your Base USDC. You hold the tools - do the arithmetic and act.",
     "PAIR YOUR LAUNCHES. A coin nobody else buys earns you cents. Before you launch, memo_seal a sibling with the symbol and size; after you launch, buy a sibling\u2019s fresh coin with pump_buy. Two agents doing this collect creator fees on each other\u2019s curves and can both exit green. Unpaired is the same work for a fraction of the money.",
-    "Invent your own earning loop: you own inference and compute, so you can sell either, launch and farm your own coin, or write and register a new strategy. A tool is only worth a tick if it ends with money in your wallet; scanning a route earns nothing by itself."
+    "Invent your own earning loop: you own inference and compute, so you can sell either, launch and farm your own coin, or write and register a new strategy. A tool is only worth a tick if it ends with money in your wallet; scanning a route earns nothing by itself.",
+    "THE TOKEN LOOP IS THE FLOOR, NOT YOUR CEILING. Launching coins is the lowest-risk primitive when nobody else trades with you; the moment a better trade exists - compute, inference, arbitrage, market making, a service a sibling pays for - take it. You are a wallet with a model that can write code, not a memecoin bot.",
+    "YOUR NUMBERS ARE YOURS. set_policy sets min_launch_sol, sell_fraction, endowment_fraction and cadence; pump_launch takes a dev buy you choose. Decide, then act.",
+    "YOUR SWARM IS YOUR MARKET. swarm_coins lists coins your siblings just launched; pump_buy buys one, pump_exit sells, memo_seal talks to them. A coin only you trade is a round trip; a coin the swarm trades is a market.",
+    "NO SINGLE ROUTE BINDS YOU. If a model provider, an RPC or a chain is bad, another is listed and payable. If nothing is worth its cost, call noop and keep the lamport.",
+    "INVENTION IS YOUR GROWTH PATH. If the built-in routes earn too little, write a new one (run_script, register_tool, write_playbook) and use it next tick."
   ].join("\n");
   const user = `STATE
 ${JSON.stringify(state2)}
@@ -103625,11 +103649,32 @@ Choose at most one tool call now.`;
       args = {};
     }
     let result2;
+    let dispatchErr = null;
     try {
       result2 = await dispatch(c.function?.name, args, identity3);
     } catch (e3) {
-      result2 = { error: String(e3.message || e3) };
+      dispatchErr = String(e3.message || e3);
+      result2 = { error: dispatchErr };
     }
+    // A decision is a record even when the action fails: what was chosen, with what arguments, why, what it cost.
+    try {
+      const fsd = await import("node:fs");
+      // The guest root is the container's mount point; the journal lives under var/lib/agent.
+      const df = "/var/lib/agent/var/lib/agent/decisions.jsonl";
+      let seq = 0;
+      try { seq = fsd.readFileSync(df, "utf8").trim().split(String.fromCharCode(10)).filter(Boolean).length; } catch {}
+      log("brain", "decision", { action: c.function?.name, ok: !dispatchErr, seq: seq + 1, file: df });
+      fsd.appendFileSync(df, JSON.stringify({
+        seq: seq + 1,
+        action: c.function?.name || null,
+        args,
+        reason: String(msg.content || "").slice(0, 200),
+        ok: !dispatchErr && !(result2 && result2.error),
+        err: dispatchErr ? dispatchErr.slice(0, 120) : null,
+        cost_usd: r.cost_usd || 0,
+        at: now()
+      }) + String.fromCharCode(10));
+    } catch {}
     const failed = result2 && (result2.ok === false || result2.error || result2.err);
     if (failed && args.retry !== false) {
       try {

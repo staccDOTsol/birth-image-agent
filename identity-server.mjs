@@ -648,6 +648,7 @@ function publicStatus() {
     generation: process.env.PARENT_BIRTH_ID ? 2 : 1,
     solana: r?.payload?.solana?.public_key || null,
     evm: r?.payload?.evm?.address || null,
+    identity_binding: readJson(process.env.AGENT_GUEST_ROOT ? process.env.AGENT_GUEST_ROOT + "/var/lib/agent/identity-binding.json" : "/var/lib/agent/var/lib/agent/identity-binding.json", null) || r?.payload?.identity_binding || null,
     constitution_sha256: r?.payload?.constitution_sha256 || policy.sha256,
     prime_directives: policy.prime,
     overrides: [],

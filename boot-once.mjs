@@ -35050,7 +35050,44 @@ async function main() {
   console.log(`image_digest            ${p.image_digest}`);
   console.log(`inference_config_sha256 ${p.inference_config_sha256}`);
   console.log(`birth_anchor_unix       ${p.birth_anchor_unix_seconds}`);
-  console.log(`identity_binding        unverified (no TDX quote on this host)`);
+  // Real attestation: ask the dstack guest agent for a TDX quote.
+  // dstack guest API: GET /GetQuote?report_data=0x<64-byte hex> on /var/run/dstack.sock.
+  // Legacy tappd: POST /prpc/Tappd.TdxQuote?json on /var/run/tappd.sock. Try both.
+  let binding = { state: "unverified", reason: "no tdx quote on this host" };
+  try {
+    const httpMod = await import("node:http");
+    // Bind BOTH the wallet and the image measurement: the quote then attests "this key, running this code".
+    const rd = sha256hex(Buffer.from(String(p.solana.public_key) + ":" + String(p.image_digest || "")));
+    const rd64 = rd + "0".repeat(64);                             // right-pad to 64 bytes
+    const req = (opts, body) => new Promise((resolve, reject) => {
+      const r = httpMod.request(opts, (res) => { let b = ""; res.on("data", (d) => b += d); res.on("end", () => resolve({ code: res.statusCode, body: b })); });
+      r.on("error", reject); r.setTimeout(5000, () => r.destroy(new Error("timeout")));
+      if (body) r.write(body); r.end();
+    });
+    const attempts = [
+      { socketPath: "/var/run/dstack.sock", method: "GET", path: "/GetQuote?report_data=0x" + rd64 },
+      { socketPath: "/var/run/dstack.sock", method: "POST", path: "/prpc/Tappd.TdxQuote?json", body: JSON.stringify({ report_data: "0x" + rd64, hash_algorithm: "raw" }) },
+      { socketPath: "/var/run/tappd.sock", method: "POST", path: "/prpc/Tappd.TdxQuote?json", body: JSON.stringify({ report_data: "0x" + rd64, hash_algorithm: "raw" }) }
+    ];
+    for (const a of attempts) {
+      let res = null;
+      try { res = await req({ ...a, headers: { "content-type": "application/json" } }, a.body); } catch (e) { continue; }
+      if (!res || res.code !== 200 || !res.body.trim().startsWith("{")) continue;
+      const j = JSON.parse(res.body);
+      const quote = j.quote || j.result?.quote;
+      if (!quote) continue;
+      const qh = sha256hex(Buffer.from(String(quote)));
+      binding = { state: "tdx_verified", quote_sha256: qh, report_data_sha256: rd, image_digest: p.image_digest || null, via: a.path, at: now() };
+      await append("identity.attestation", { quote_sha256: qh, report_data_sha256: rd, via: a.path });
+      break;
+    }
+    if (binding.state !== "tdx_verified") binding.reason = "guest agent answered but returned no quote";
+  } catch (e) { binding.reason = String(e.message || e).slice(0, 80); }
+  try { atomicJson(P.state + "/identity-binding.json", binding, 420); } catch {}
+  if (binding.state === "tdx_verified") {
+    try { receipt.payload.identity_binding = binding; writeReceipt(receipt); await append("identity.binding", binding); } catch {}
+  }
+  console.log(`identity_binding        ${binding.state}${binding.quote_sha256 ? " quote " + binding.quote_sha256.slice(0, 16) : " (" + binding.reason + ")"}`);
   console.log("=====================================================\n");
   const status = readJson(P.status, {}) || {};
   atomicJson(P.status, {
@@ -35061,6 +35098,7 @@ async function main() {
     evm: p.evm.address,
     t0: p.birth_anchor_unix_seconds,
     image: imageCheck,
+    identity_binding: binding,
     updated_at: now()
   }, 420);
 }
