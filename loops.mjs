@@ -93393,10 +93393,11 @@ async function renewTick(identity3) {
     if (!expires) continue;
     const left = expires - Date.now();
     if (left > KEEP_MS) continue;
-    // Habitat economics at renewal: the ladder is re-priced every cycle. When the
-    // runway at this rung has collapsed (or a descendant is paying an insane
-    // premium), bridge 15 minutes and log a stepdown instead of committing
-    // another full hour on an unjustified box; the premium rides in the record.
+    // Habitat economics at renewal: this lease makes the node a TEE member, and
+    // the question is whether the POPULATION still needs this member in the
+    // enclave. Sole live TEE member = the anchor: renew, the claim rides on it.
+    // One of several = redundant: bridge 15 minutes and step down. The verdict
+    // (and the premium) rides in the lease.renew decision record either way.
     let renewBody = { hours: 1 };
     let __verd = null;
     try {

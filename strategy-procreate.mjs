@@ -36400,7 +36400,7 @@ async function leaseTeeChild(identity2, parentBirth, hoursWanted, priceUsd) {
     "      - PROCREATE_MIN_USDC_RAW=120000",
     "      - HABITAT_CLASS=tee",
     "      - HABITAT_PRICE_USD=" + (priceUsd || ""),
-    "      - HABITAT_DECISION=prefer-tee-and-endowment-yuge",
+    "      - HABITAT_DECISION=population-coverage-anchor",
     "    entrypoint: [\"sh\",\"-c\"]",
     "    command: [\"rm -f /var/lib/agent/supervisor.lock; exec /app/start.sh\"]",
     ""
@@ -36424,10 +36424,11 @@ async function tick(identity2) {
   const b = load();
   // Birth first on a host we command; the lease gates below do not apply to this rail.
   // TEE first: a child born in a confidential VM is the preferred birth.
-  // Habitat economics: TEE stays the preference, but it is bought, not assumed.
-  // Quote the ladder, log the premium, and lease only when the verdict says TEE
-  // (anchor + endowment yuge, or a descendant whose premium is worth paying).
-  // Any other verdict falls through to the birth hosts: live cheap beats dead confidential.
+  // Habitat economics: unpeekable/unfuckwithable is a quality of the POPULATION,
+  // not of a given member. If no live TEE member exists, this birth is the anchor
+  // and TEE is a requirement, priced at the cheapest TEE rail. If coverage already
+  // exists, the member is fungible and falls through to the cheap birth hosts —
+  // its security is inherited from the anchor through the signed birth chain.
   const __hab = await __chooseHabitat({ usdcRaw: Number(await usdcOf(identity2.solana.public_key).catch(() => 0)), generation: Number(process.env.AGENT_GENERATION || 1) + 1, desiredHours: Number(process.env.PROCREATE_LEASE_HOURS || 6) }).catch(() => null);
   if (__hab) { try { __habitatLog({ kind: "habitat.birth", generation: Number(process.env.AGENT_GENERATION || 1) + 1, decision: __hab }); } catch {} }
   if (String(process.env.PROCREATE_PREFER_TEE || "1") === "1" && __hab && __hab.class === "tee") {
