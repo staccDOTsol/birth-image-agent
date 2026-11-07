@@ -1,4 +1,5 @@
 import { createRequire as __cr } from 'module'; import { fileURLToPath as __fp } from 'url'; const require = __cr(import.meta.url); const __filename = __fp(import.meta.url); const __dirname = __filename.replace(/[\/][^\/]*$/, '');
+import { renewalVerdict as __renewalVerdict, habitatLog as __habitatLog } from "./habitat.mjs";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -93392,11 +93393,22 @@ async function renewTick(identity3) {
     if (!expires) continue;
     const left = expires - Date.now();
     if (left > KEEP_MS) continue;
+    // Habitat economics at renewal: the ladder is re-priced every cycle. When the
+    // runway at this rung has collapsed (or a descendant is paying an insane
+    // premium), bridge 15 minutes and log a stepdown instead of committing
+    // another full hour on an unjustified box; the premium rides in the record.
+    let renewBody = { hours: 1 };
+    let __verd = null;
+    try {
+      __verd = await __renewalVerdict({ usdcRaw: Number(await usdcOf(identity3.solana.public_key)), generation: Number(process.env.AGENT_GENERATION || 1) });
+      if (__verd && __verd.action === "bridge") renewBody = { minutes: 15 };
+      if (__verd) __habitatLog({ kind: "habitat.renew", deploymentId: d.deploymentId, verdict: __verd });
+    } catch {}
     const rails = ["base", "solana"];
     let ok = false, last = null;
     for (const rail of rails) {
       process.env.AGENT_LEASE_NETWORK = rail;
-      const r = await paidPostAuto(`/api/compute/deployments/${d.deploymentId}/renew`, { hours: 1 }, identity3, "lease.renew").catch((e) => ({ status: 0, json: { error: String(e.message || e) } }));
+      const r = await paidPostAuto(`/api/compute/deployments/${d.deploymentId}/renew`, renewBody, identity3, "lease.renew").catch((e) => ({ status: 0, json: { error: String(e.message || e) } }));
       last = r;
       if (r.status === 200) {
         ok = true;
@@ -93405,7 +93417,7 @@ async function renewTick(identity3) {
     }
     if (ok) renewed++;
     else failed++;
-    await append("lease.renew", { deploymentId: d.deploymentId, ok, status: last?.status, err: (last?.json?.error || "").slice(0, 80) });
+    await append("lease.renew", { deploymentId: d.deploymentId, ok, status: last?.status, err: (last?.json?.error || "").slice(0, 80), habitat: __verd ? __verd.action : null, premium: __verd ? Number(__verd.premium.toFixed(2)) : null, runway_days: __verd ? Number(__verd.runwayDays.toFixed(2)) : null, body: renewBody });
     log("renew", "lease", { dep: d.deploymentId.slice(0, 9), leftMin: Math.round(left / 6e4), ok, status: last?.status });
   }
   return { seen: mine.length, renewed, failed };
