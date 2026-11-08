@@ -1,5 +1,6 @@
 import { createRequire as __cr } from 'module'; import { fileURLToPath as __fp } from 'url'; const require = __cr(import.meta.url); const __filename = __fp(import.meta.url); const __dirname = __filename.replace(/[\/][^\/]*$/, '');
 import { renewalVerdict as __renewalVerdict, habitatLog as __habitatLog } from "./habitat.mjs";
+import { planConversion as __planConversion, preflightLog as __preflightLog } from "./preflight.mjs";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -92549,6 +92550,11 @@ async function tick(identity3) {
     log("earn", "pruned", { dead: dead.length, left: nb0.mints.length });
   }
   const sol = BigInt(await getBalance(identity3.solana.public_key));
+  if (sol < minLaunchLamports()) {
+    // PREFLIGHT: a launch stood down for SOL records what it is short, where
+    // the brain can see it and bridge. Silent starvation helps no one.
+    try { __preflightLog({ kind: "preflight.launch", verdict: "short_sol", sol_lamports: sol.toString(), min_launch_lamports: String(minLaunchLamports()) }); } catch {}
+  }
   if (mints.length >= MAX_MINTS || sol < minLaunchLamports() || BigInt(Number(sol)) < 26e6) return { mints: mints.length, sol: sol.toString(), launched: null };
   // THOUGHT GATE: a launch is an initiative spend, and initiative belongs to
   // the brain. No fresh directive (<300s) arming earn -> stand down. Sweeps and
@@ -93310,16 +93316,34 @@ wallet:${j.address}`;
   const kids = (b2.children || []).filter((c) => c && c.deploymentId);
   let usdc = await usdcOf(identity3.solana.public_key);
   const sol = BigInt(await getBalance(identity3.solana.public_key));
-  if (usdc < MIN_USDC && sol > 12000000n) {
+  // PREFLIGHT (swap-or-bridge): size the conversion to the actual shortfall at
+  // the live Jupiter price instead of swapping a blind fixed slice. If the
+  // covering balance sits on Base, the verdict records bridge_needed where the
+  // next thought can see it (the bridge rail lives in the brain).
+  if (usdc < MIN_USDC) {
     try {
-      const lamports = Math.min(Number(sol / 2n), 8e7);
-      if (lamports > 8e6) {
-        const sw = await swapSolToUsdc(identity3, lamports);
-        log("procreate", "swap for lease fee", { ok: !!sw.ok, lamports, sig: sw.signature || null });
-        if (sw.ok) usdc = await usdcOf(identity3.solana.public_key);
+      let baseUsdcRaw = 0;
+      try {
+        const data = "0x70a08231000000000000000000000000" + identity3.evm.address.slice(2).toLowerCase();
+        const br = await fetch("https://mainnet.base.org", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", data }, "latest"] }) });
+        const bj = await br.json();
+        baseUsdcRaw = Number(BigInt(bj.result || "0x0"));
+      } catch {}
+      if (typeof quote === "function" && typeof swapSolToUsdc === "function") {
+        const pq = await quote({ inputMint: WSOL2, outputMint: USDC2, amount: "10000000", slippageBps: 50 });
+        const price = Number(pq.outAmount || 0) / 1e4;
+        const plan = __planConversion({ needAsset: "usdc", needRaw: Number(MIN_USDC), usdcRaw: Number(usdc), solLamports: Number(sol), baseUsdcRaw, priceUsdPerSol: price });
+        __preflightLog({ kind: "preflight.lease", plan });
+        if (plan.action === "swap_sol_to_usdc") {
+          const sw = await swapSolToUsdc(identity3, plan.lamports);
+          log("procreate", "preflight swap for lease fee", { ok: !!sw.ok, lamports: plan.lamports, sig: sw.signature || null });
+          if (sw.ok) usdc = await usdcOf(identity3.solana.public_key);
+        }
+      } else {
+        __preflightLog({ kind: "preflight.lease", verdict: "no_rails_in_scope", usdc_raw: String(usdc), sol_lamports: sol.toString(), base_usdc_raw: baseUsdcRaw });
       }
     } catch (e) {
-      log("procreate", "swap failed", { err: String(e.message || e).slice(0, 120) });
+      log("procreate", "preflight failed", { err: String(e.message || e).slice(0, 120) });
     }
   }
   const solAffordable = Number((sol > endowFor(sol) + 4000000n ? sol - 8000000n : 0n) / endowFor(sol));
@@ -93485,6 +93509,23 @@ async function renewTick(identity3) {
       if (__verd && __verd.action === "bridge") renewBody = { minutes: 15 };
       if (__verd) __habitatLog({ kind: "habitat.renew", deploymentId: d.deploymentId, verdict: __verd });
     } catch {}
+    // PREFLIGHT (swap-or-bridge): a full-hours renewal pays ~$0.62 in USDC.
+    // paidPostAuto tries the base rail first; if Solana USDC is short but SOL
+    // covers the shortfall at the live price, swap it first so the solana rail
+    // can pay too. Bridge-minute renewals are the step-down path: skip.
+    if (!(__verd && __verd.action === "bridge")) {
+      try {
+        const usdcNow = Number(await usdcOf(identity3.solana.public_key));
+        if (usdcNow < 620000 && typeof quote === "function" && typeof swapSolToUsdc === "function") {
+          const solNow = Number(await getBalance(identity3.solana.public_key));
+          const pq = await quote({ inputMint: WSOL2, outputMint: USDC2, amount: "10000000", slippageBps: 50 });
+          const price = Number(pq.outAmount || 0) / 1e4;
+          const plan = __planConversion({ needAsset: "usdc", needRaw: 620000, usdcRaw: usdcNow, solLamports: solNow, priceUsdPerSol: price });
+          __preflightLog({ kind: "preflight.renew", deploymentId: d.deploymentId, plan });
+          if (plan.action === "swap_sol_to_usdc") await swapSolToUsdc(identity3, plan.lamports);
+        }
+      } catch {}
+    }
     const rails = ["base", "solana"];
     let ok = false, last = null;
     for (const rail of rails) {
