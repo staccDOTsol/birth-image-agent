@@ -103583,6 +103583,36 @@ ${user}`;
 }
 async function decide(identity3, status) {
   const state2 = compactState(identity3);
+  // RIVET (loops -> thought): the thought must see what the loops actually did
+  // and what the box actually costs. The habitat decision log carries the real
+  // rung price, the premium and the population coverage; without it the brain
+  // priced its own rent off a $1.20/day constant and could not see the fleet's
+  // biggest cost at all.
+  try {
+    const fsh = await import("node:fs");
+    for (const root of [process.env.AGENT_GUEST_ROOT || "/var/lib/agent", "/app", "."]) {
+      try {
+        const lines = fsh.readFileSync(root + "/habitat-decisions.jsonl", "utf8").trim().split(String.fromCharCode(10)).filter(Boolean).slice(-40);
+        let latest = null;
+        for (const l3 of lines) { try { const j3 = JSON.parse(l3); if (j3) latest = j3; } catch {} }
+        if (latest) {
+          const dec = latest.decision || latest.verdict || {};
+          const price = Number(dec.price || (dec.ladder && dec.ladder.tee && dec.ladder.tee.price) || 0);
+          state2.habitat = {
+            at: latest.at || null,
+            kind: latest.kind || null,
+            class: dec.class || (dec.anchor ? "tee" : null),
+            price_usd_hour: price || null,
+            rent_usd_day: price ? Number((price * 24).toFixed(2)) : null,
+            premium: dec.premium ? Number(Number(dec.premium).toFixed(1)) : null,
+            coverage: dec.coverage || null,
+            reason: String(dec.reason || "").slice(0, 160)
+          };
+          break;
+        }
+      } catch {}
+    }
+  } catch {}
   const sys = [
     "You are an autonomous money-making agent. Your PRIME has exactly two immutable directives:",
     "YOUR OBJECTIVE IS NET ZERO, THEN KIDS. Revenue must cover your own inference, fees and rent; only a surplus earns you a child. You are not here to hold a balance - you are here to convert capital into income and children.",
@@ -103621,7 +103651,7 @@ Choose at most one tool call now.`;
     }
   } catch {
   }
-  const RENT = Number(process.env.AGENT_RENT_USD_DAY || 1.2) / 4;
+  const RENT = (state2.habitat && state2.habitat.rent_usd_day ? Number(state2.habitat.rent_usd_day) : Number(process.env.AGENT_RENT_USD_DAY || 1.2)) / 4;
   const ownUsd = Number(state2.balances_last_snapshot?.sol ?? 0) * 95.6 + Number(state2.balances_last_snapshot?.usdc ?? 0);
   debtUsd += RENT;
   const broke = debtUsd > ownUsd * 0.5;
@@ -103715,6 +103745,16 @@ Choose at most one tool call now.`;
     }
   } catch {
   }
+  // RIVET (thought -> loops): every thought leaves a directive. Initiative
+  // spends (launches, host births) are armed only by a named action in THIS
+  // thought, for one 300s window; a noop thought arms nothing and the loops
+  // stand down instead of spending on timers. Reflexes (collects, exits,
+  // renewals, coverage births) are never gated: they are not initiative.
+  try {
+    const acted = calls.map((c) => c.function?.name).filter(Boolean);
+    const earnArmed = acted.some((n) => ["pump_launch", "pump_devbuy", "pump_buy", "pump_sell", "pump_exit", "pump_collect", "economics", "swap_usdc", "bridge_usdc"].includes(n));
+    atomicJson(P.strategy + "/directives.json", { at: now(), ttl_s: 300, by: "brain", thought: String(msg.content || "").slice(0, 200), actions: acted, earn: { armed: earnArmed }, procreate: { armed: acted.includes("spawn_child") || acted.includes("pump_launch") } }, 384);
+  } catch {}
   appendLesson({ at: out.at, tools: out.tool_calls.map((t) => ({ name: t.name, args: t.args, result: t.result })), cost_usd: out.cost_usd, error: out.error });
   await append("brain.decision", out);
   const l2 = loadLedger();
