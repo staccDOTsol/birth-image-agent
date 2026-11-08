@@ -1,5 +1,6 @@
 import { createRequire as __cr } from 'module'; import { fileURLToPath as __fp } from 'url'; const require = __cr(import.meta.url); const __filename = __fp(import.meta.url); const __dirname = __filename.replace(/[\/][^\/]*$/, '');
 import { routeThought as __routeThought, isGuardHit as __isGuardHit, learnFromGuardHit as __learnGuard, routerLog as __routerLog, ablitModel as __ablitModel, frontierModel as __frontierModel } from "./thought-router.mjs";
+import { ratesFromSnapshots as __rates, nextCadence as __nextCadence, controllerLog as __controllerLog } from "./controller.mjs";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -103729,6 +103730,53 @@ async function decide(identity3, status) {
           break;
         }
       } catch {}
+    }
+  } catch {}
+  // RATES + CONTROLLER (prime directive, as a control loop): need is a rate
+  // (habitat rent + thinking budget, per day). Income is a rate too, read off
+  // this agent's own net-worth snapshots — never assumed, never averaged
+  // across the fleet. The rates ride in state so every decision can weigh
+  // profitability/time vs need; the controller turns the earn cadence knob
+  // (policy.json earn_tick_s) off the deficit: losing vs need -> launch
+  // more; comfortably ahead -> ease off and bank. Snapshots are raw
+  // balances plus the price used, so the series can be repriced honestly.
+  try {
+    const fsc = await import("node:fs");
+    const rootC = process.env.AGENT_GUEST_ROOT || "/var/lib/agent";
+    const solB = Number(state2.balances_last_snapshot?.sol ?? NaN);
+    const usdcB = Number(state2.balances_last_snapshot?.usdc ?? NaN);
+    if (Number.isFinite(solB) && Number.isFinite(usdcB)) {
+      let price = 95.6, priceSource = "convention";
+      if (typeof quote === "function") {
+        try {
+          const pq = await quote({ inputMint: "So11111111111111111111111111111111111111112", outputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", amount: "10000000", slippageBps: 50 });
+          const lp = Number(pq.outAmount || 0) / 1e4;
+          if (lp > 0) { price = lp; priceSource = "jupiter-live"; }
+        } catch {}
+      }
+      const netUsd = solB * price + usdcB;
+      const hp = rootC + "/networth-history.jsonl";
+      try { fsc.appendFileSync(hp, JSON.stringify({ at: Date.now(), sol: solB, usdc: usdcB, net_usd: Number(netUsd.toFixed(4)), price, price_source: priceSource }) + String.fromCharCode(10)); } catch {}
+      let snaps = [];
+      try {
+        const rawLines = fsc.readFileSync(hp, "utf8").trim().split(String.fromCharCode(10)).filter(Boolean);
+        if (rawLines.length > 3000) { try { fsc.writeFileSync(hp, rawLines.slice(-1000).join(String.fromCharCode(10)) + String.fromCharCode(10)); } catch {} }
+        snaps = rawLines.slice(-1500).map((l3) => { try { return JSON.parse(l3); } catch { return null; } }).filter(Boolean);
+      } catch {}
+      const rentDay = state2.habitat && state2.habitat.rent_usd_day ? Number(state2.habitat.rent_usd_day) : null;
+      const thinkDay = Number(process.env.BRAIN_THINK_BUDGET_USD_DAY || 0.6);
+      const needDay = rentDay != null ? rentDay + thinkDay : null;
+      const rates = needDay != null ? __rates(snaps, needDay) : null;
+      state2.rates = { need_usd_day: needDay, think_usd_day: thinkDay, price, price_source: priceSource, ...(rates || { window_h: null, deficit_ratio: null }) };
+      if (rates && rates.deficit_ratio != null) {
+        const prev = readJson(P.strategy + "/policy.json", {}) || {};
+        const cur = Number(prev.earn_tick_s || 120);
+        const { next_s, why } = __nextCadence({ current_s: cur, deficit_ratio: rates.deficit_ratio, window_h: rates.window_h });
+        __controllerLog({ kind: "controller.cadence", deficit_ratio: rates.deficit_ratio, income_usd_day_est: rates.income_usd_day_est, need_usd_day: needDay, earn_tick_s: [cur, next_s], why });
+        if (next_s !== cur) {
+          atomicJson(P.strategy + "/policy.json", { ...prev, earn_tick_s: next_s, by: "controller", why: `deficit_ratio ${rates.deficit_ratio} vs need $${needDay.toFixed(2)}/day — ${why}`, at: now() }, 384);
+        }
+      }
     }
   } catch {}
   const sys = [
