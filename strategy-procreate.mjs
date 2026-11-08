@@ -36483,6 +36483,20 @@ async function tick(identity2) {
       }
     } catch (e) { log("procreate", "tee lease failed", { err: String(e.message || e).slice(0, 120) }); }
   }
+  // THOUGHT GATE: host births are initiative and wait for a fresh directive
+  // arming procreate. The TEE path above is the population-coverage reflex and
+  // is deliberately NOT gated: an uncovered population re-anchors whether or
+  // not the brain is awake. THOUGHT_GATE=0 disables; brain-less profiles keep
+  // their initiative.
+  if (String(process.env.THOUGHT_GATE || "1") !== "0" && !String(process.env.AGENT_SKIP || "").includes("brain")) {
+    try {
+      const d = readJson(P.strategy + "/directives.json", null);
+      if (!d || now() - Number(d.at || 0) > 300 || !(d.procreate && d.procreate.armed)) {
+        log("procreate", "standing down: no fresh thought directive", { have: !!d });
+        return { kids: b.children.length, stood_down: "no-thought-directive" };
+      }
+    } catch {}
+  }
   // A birth host is a convenience, not a chokepoint: try every host we know until one answers.
   const BHS = String(process.env.BIRTH_HOSTS || process.env.BIRTH_HOST || "").split(",").map((x) => x.trim()).filter(Boolean);
   for (const BH of BHS) {
