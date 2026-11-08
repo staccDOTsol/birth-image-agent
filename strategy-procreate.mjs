@@ -1,5 +1,5 @@
 import { createRequire as __cr } from 'module'; import { fileURLToPath as __fp } from 'url'; const require = __cr(import.meta.url); const __filename = __fp(import.meta.url); const __dirname = __filename.replace(/[\/][^\/]*$/, '');
-import { chooseHabitat as __chooseHabitat, habitatLog as __habitatLog } from "./habitat.mjs";
+import { chooseHabitat as __chooseHabitat, habitatLog as __habitatLog, quoteLadder as __quoteLadder, teeCoverage as __teeCoverage } from "./habitat.mjs";
 import { planConversion as __planConversion, preflightLog as __preflightLog } from "./preflight.mjs";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -36626,6 +36626,31 @@ wallet:${j.address}`;
   const affordable = Math.min(Number(usdc / MIN_USDC), solAffordable);
   const cap = kids.length + affordable;
   if (kids.length >= cap || affordable < 1) return { kids: kids.length, cap, skipped: "resources", usdc: usdc.toString(), sol: sol.toString() };
+  // VIABILITY (prime directive): affordability asks can the parent pay;
+  // viability asks will the kid live. Priced off the live ladder: the child's
+  // endowment must cover VIABILITY_CHILD_DAYS of its own burn (member rung
+  // rent + thinking budget) and the parent's post-endowment runway must
+  // clear VIABILITY_PARENT_DAYS. Member births only — an uncovered
+  // population's anchor birth is a coverage reflex and is not gated here.
+  // Unpriced -> cannot judge -> do not block.
+  try {
+    const covV = __teeCoverage();
+    if (covV && covV.covered && typeof quote === "function") {
+      const pq = await quote({ inputMint: WSOL, outputMint: USDC2, amount: "10000000", slippageBps: 50 });
+      const solPrice = Number(pq.outAmount || 0) / 1e4;
+      const ladder = await __quoteLadder();
+      if (solPrice > 0 && ladder) {
+        const thinkDay = Number(process.env.BRAIN_THINK_BUDGET_USD_DAY || 0.6);
+        const endow = endowFor(sol);
+        const childHourly = Number((ladder.nontee && ladder.nontee.price) || 0.012);
+        const childDays = (Number(endow) / 1e9 * solPrice) / (childHourly * 24 + thinkDay);
+        const parentHourly = String(process.env.HABITAT_CLASS || "") === "tee" ? Number((ladder.tee && ladder.tee.price) || 0.12) : childHourly;
+        const parentDays = (Number(sol - endow) / 1e9 * solPrice) / (parentHourly * 24 + thinkDay);
+        __habitatLog({ kind: "habitat.viability", child_days: Number(childDays.toFixed(1)), parent_days: Number(parentDays.toFixed(1)), endow_usd: Number((Number(endow) / 1e9 * solPrice).toFixed(2)) });
+        if (childDays < Number(process.env.VIABILITY_CHILD_DAYS || 7) || parentDays < Number(process.env.VIABILITY_PARENT_DAYS || 7)) return { kids: kids.length, cap, skipped: "viability", child_days: Number(childDays.toFixed(1)), parent_days: Number(parentDays.toFixed(1)) };
+      }
+    }
+  } catch {}
   if (usdc < MIN_USDC) {
     if (usdc < MIN_USDC) return { kids: kids.length, skipped: "usdc", usdc: usdc.toString() };
   }
