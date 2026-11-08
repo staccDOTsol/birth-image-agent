@@ -231,6 +231,7 @@ export async function renewalVerdict({ usdcRaw } = {}) {
 
 export function habitatLog(rec) {
   try {
-    appendFileSync(process.env.HABITAT_LOG_PATH || "habitat-decisions.jsonl", JSON.stringify({ at: Date.now(), ...rec }) + "\n");
+    const p = process.env.HABITAT_LOG_PATH || (process.env.AGENT_GUEST_ROOT ? process.env.AGENT_GUEST_ROOT + "/habitat-decisions.jsonl" : "habitat-decisions.jsonl");
+    appendFileSync(p, JSON.stringify({ at: Date.now(), ...rec }) + "\n");
   } catch { /* the decision record must never break a birth or a renewal */ }
 }

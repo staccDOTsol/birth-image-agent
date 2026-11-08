@@ -92488,6 +92488,19 @@ async function tick(identity3) {
   }
   const sol = BigInt(await getBalance(identity3.solana.public_key));
   if (mints.length >= MAX_MINTS || sol < minLaunchLamports() || BigInt(Number(sol)) < 26e6) return { mints: mints.length, sol: sol.toString(), launched: null };
+  // THOUGHT GATE: a launch is an initiative spend, and initiative belongs to
+  // the brain. No fresh directive (<300s) arming earn -> stand down. Sweeps and
+  // collects above are reflexes and already ran. Profiles that skip the brain
+  // keep their initiative; THOUGHT_GATE=0 disables the gate entirely.
+  if (String(process.env.THOUGHT_GATE || "1") !== "0" && !String(process.env.AGENT_SKIP || "").includes("brain")) {
+    try {
+      const d = readJson(P.strategy + "/directives.json", null);
+      if (!d || now() - Number(d.at || 0) > 300 || !(d.earn && d.earn.armed)) {
+        log("earn", "standing down: no fresh thought directive", { have: !!d, age_s: d ? now() - Number(d.at || 0) : null });
+        return { mints: mints.length, sol: sol.toString(), launched: null, stood_down: "no-thought-directive" };
+      }
+    } catch {}
+  }
   const st = state({});
   const tag = String(st.birth_id || "agent").slice(0, 8);
   const name = `Birth ${tag}`;
@@ -93140,7 +93153,12 @@ async function tick2(identity3) {
   // Birth first: a birth host gives the parent capacity it can actually command,
   // so the SOL/USDC lease gates do not apply to this rail.
   const BH0 = process.env.BIRTH_HOST;
-  if (BH0) {
+  // THOUGHT GATE: host births are initiative; without a fresh directive arming
+  // procreate the host block stands down (the lease/queue paths below are
+  // reflexes and coverage work, not initiative). THOUGHT_GATE=0 disables.
+  const __armed = (() => { try { if (String(process.env.THOUGHT_GATE || "1") === "0" || String(process.env.AGENT_SKIP || "").includes("brain")) return true; const d = readJson(P.strategy + "/directives.json", null); return !!(d && now() - Number(d.at || 0) <= 300 && d.procreate && d.procreate.armed); } catch { return true; } })();
+  if (BH0 && !__armed) log("procreate", "standing down: no fresh thought directive", {});
+  if (BH0 && __armed) {
     try {
       const solB = BigInt(await getBalance(identity3.solana.public_key));
       const endow = endowFor(solB);
