@@ -93595,6 +93595,14 @@ var lastProcreate = 0;
 var lastRenew = 0;
 while (true) {
   const nowMs = Date.now();
+  // Cadence is a decision, not a constant: the brain and its controller write
+  // policy.json; the ticker re-reads it each cycle so a cadence change lands
+  // within one sleep instead of at the next boot. Clamps match set_policy.
+  try {
+    const pol = readJson(P.strategy + "/policy.json", {}) || {};
+    if (Number(pol.earn_tick_s) > 0) EARN_MS = Math.min(900, Math.max(30, Number(pol.earn_tick_s))) * 1e3;
+    if (Number(pol.procreate_tick_s) > 0) PROCREATE_MS = Math.min(3600, Math.max(60, Number(pol.procreate_tick_s))) * 1e3;
+  } catch {}
   if (nowMs - lastEarn >= EARN_MS) {
     lastEarn = nowMs;
     try {
