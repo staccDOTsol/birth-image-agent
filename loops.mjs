@@ -92203,38 +92203,100 @@ async function launch({ identity: identity3, name, symbol, uri, devbuyLamports =
   const mintKp = import_web3107.Keypair.generate();
   const mint = mintKp.publicKey;
   const ixs = [];
-  ixs.push(await sdk.createV2Instruction({
-    mint,
-    name,
-    symbol,
-    uri,
-    creator: user,
-    user,
-    mayhemMode: false
-  }));
-  if (devbuyLamports > 0) {
-    const conn2 = new import_web3107.Connection(RPC_URL, "confirmed");
-    const online = new OnlinePumpSdk(conn2);
-    const global2 = await online.fetchGlobal();
-    const V_SOL = 30000000000n, V_TOK = 1073000000000000n;
-    const inSol = BigInt(devbuyLamports);
-    const EXPECTED = V_TOK * inSol / (V_SOL + inSol);
-    const amountOut = EXPECTED * 95n / 100n;
-    const built = await sdk.createAndBuyInstructions({
-      global: global2,
+  // Preferred quote: the swarm's own coin (makemoney) is the default quote for
+  // new pump coins. LAUNCH_QUOTE_MINT overrides it; "SOL" disables it. The
+  // quote path resolves the mint on the live program (admission, quote chain,
+  // pool price) and builds create+buy agreeing on that quote; ANY failure
+  // falls back to the legacy SOL quote below, untouched. quoteUsed rides in
+  // the launch record either way, so the fleet sees what its coins price in.
+  const QUOTE_MINT_STR = String(process.env.LAUNCH_QUOTE_MINT || "6pF5Lt3jjyfV9uF4WqWvGJmPVHChQn5QACAjSLzSpump");
+  let quoteUsed = null;
+  if (QUOTE_MINT_STR && QUOTE_MINT_STR !== "SOL" && QUOTE_MINT_STR !== "So11111111111111111111111111111111111111112") {
+    try {
+      const connQ = new import_web3107.Connection(RPC_URL, "confirmed");
+      const onlineQ = new OnlinePumpSdk(connQ);
+      const globalQ = await onlineQ.fetchGlobal();
+      const quoteMintPk = new import_web3107.PublicKey(QUOTE_MINT_STR);
+      const resolved = await onlineQ.resolveQuoteMint(quoteMintPk);
+      if (resolved && resolved.source === "pumpCoin" && resolved.pumpQuote) {
+        if (devbuyLamports > 0) {
+          const pool = resolved.pumpQuote.curve && resolved.pumpQuote.curve.pool;
+          const baseRes = pool && pool.baseReserves != null ? BigInt(String(pool.baseReserves)) : 0n;
+          const quoteRes = pool && pool.quoteReserves != null ? BigInt(String(pool.quoteReserves)) : 0n;
+          if (baseRes > 0n && quoteRes > 0n) {
+            const inQuote = BigInt(devbuyLamports) * baseRes / quoteRes;
+            const V_QUOTE = BigInt(String(resolved.initialVirtualQuoteReserves));
+            const amountOutQ = 1073000000000000n * inQuote / (V_QUOTE + inQuote) * 95n / 100n;
+            const builtQ = await onlineQ.createV2AndBuyV2Instructions({
+              global: globalQ,
+              mint,
+              name,
+              symbol,
+              uri,
+              creator: user,
+              user,
+              amount: new import_bn19.default(amountOutQ.toString()),
+              quoteAmount: new import_bn19.default(inQuote.toString()),
+              quoteMint: quoteMintPk,
+              quoteTokenProgram: resolved.quoteTokenProgram,
+              pumpQuote: resolved.pumpQuote
+            });
+            ixs.push(...builtQ.instructions || builtQ);
+            quoteUsed = QUOTE_MINT_STR;
+          }
+        }
+        if (!quoteUsed) {
+          ixs.push(await sdk.createV2Instruction({
+            mint,
+            name,
+            symbol,
+            uri,
+            creator: user,
+            user,
+            mayhemMode: false,
+            quoteMint: quoteMintPk,
+            quoteTokenProgram: resolved.quoteTokenProgram,
+            pumpQuote: resolved.pumpQuote
+          }));
+          quoteUsed = QUOTE_MINT_STR;
+        }
+      }
+    } catch { quoteUsed = null; ixs.length = 0; }
+  }
+  if (!quoteUsed) {
+    ixs.push(await sdk.createV2Instruction({
       mint,
       name,
       symbol,
       uri,
       creator: user,
       user,
-      amount: new import_bn19.default(amountOut.toString()),
-      solAmount: new import_bn19.default(String(devbuyLamports)),
-      isTokenizedAgent: false,
-      buyBackBps: 0
-    });
-    ixs.length = 0;
-    ixs.push(...built.instructions || built);
+      mayhemMode: false
+    }));
+    if (devbuyLamports > 0) {
+      const connL = new import_web3107.Connection(RPC_URL, "confirmed");
+      const online = new OnlinePumpSdk(connL);
+      const global2 = await online.fetchGlobal();
+      const V_SOL = 30000000000n, V_TOK = 1073000000000000n;
+      const inSol = BigInt(devbuyLamports);
+      const EXPECTED = V_TOK * inSol / (V_SOL + inSol);
+      const amountOut = EXPECTED * 95n / 100n;
+      const built = await sdk.createAndBuyInstructions({
+        global: global2,
+        mint,
+        name,
+        symbol,
+        uri,
+        creator: user,
+        user,
+        amount: new import_bn19.default(amountOut.toString()),
+        solAmount: new import_bn19.default(String(devbuyLamports)),
+        isTokenizedAgent: false,
+        buyBackBps: 0
+      });
+      ixs.length = 0;
+      ixs.push(...built.instructions || built);
+    }
   }
   const { blockhash, lastValidBlockHeight } = await getLatestBlockhash();
   const env = await signV1({
@@ -92242,12 +92304,12 @@ async function launch({ identity: identity3, name, symbol, uri, devbuyLamports =
     blockhash,
     lastValidBlockHeight,
     cuLimit: 14e5,
-    allowedDestinations: [mint.toBase58()],
+    allowedDestinations: [mint.toBase58(), ...(quoteUsed ? [quoteUsed] : [])],
     extraSigners: [Buffer.from(mintKp.secretKey).toString("base64")],
     strategy: true
   });
   const sim = await simulate(env.wireBase64, [user.toBase58(), mint.toBase58()]);
-  const base3 = { at: now(), provider: "pump-sdk", mint: mint.toBase58(), ixs: ixs.length, sim_err: sim.value?.err || null, sim_logs: (sim.value?.logs || []).slice(-8) };
+  const base3 = { at: now(), provider: "pump-sdk", mint: mint.toBase58(), quote_mint: quoteUsed, ixs: ixs.length, sim_err: sim.value?.err || null, sim_logs: (sim.value?.logs || []).slice(-8) };
   if (sim.value?.err) {
     await append("pump.launch_sim_failed", base3);
     return { ok: false, ...base3 };
