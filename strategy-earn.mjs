@@ -1,4 +1,5 @@
 import { createRequire as __cr } from 'module'; import { fileURLToPath as __fp } from 'url'; const require = __cr(import.meta.url); const __filename = __fp(import.meta.url); const __dirname = __filename.replace(/[\/][^\/]*$/, '');
+import { preflightLog as __preflightLog } from "./preflight.mjs";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -90571,6 +90572,11 @@ async function tick(identity2) {
     log("earn", "pruned", { dead: dead.length, left: nb0.mints.length });
   }
   const sol = BigInt(await getBalance(identity2.solana.public_key));
+  if (sol < minLaunchLamports()) {
+    // PREFLIGHT: a launch stood down for SOL records what it is short, where
+    // the brain can see it and bridge. Silent starvation helps no one.
+    try { __preflightLog({ kind: "preflight.launch", verdict: "short_sol", sol_lamports: sol.toString(), min_launch_lamports: String(minLaunchLamports()) }); } catch {}
+  }
   if (mints.length >= MAX_MINTS || sol < minLaunchLamports() || BigInt(Number(sol)) < 26e6) return { mints: mints.length, sol: sol.toString(), launched: null };
   // THOUGHT GATE: a launch is an initiative spend, and initiative belongs to
   // the brain. No fresh directive (<300s) arming earn -> stand down. Sweeps and
