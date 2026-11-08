@@ -1,4 +1,5 @@
 import { createRequire as __cr } from 'module'; import { fileURLToPath as __fp } from 'url'; const require = __cr(import.meta.url); const __filename = __fp(import.meta.url); const __dirname = __filename.replace(/[\/][^\/]*$/, '');
+import { renewalVerdict as __renewalVerdict, habitatLog as __habitatLog } from "./habitat.mjs";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -92487,6 +92488,19 @@ async function tick(identity3) {
   }
   const sol = BigInt(await getBalance(identity3.solana.public_key));
   if (mints.length >= MAX_MINTS || sol < minLaunchLamports() || BigInt(Number(sol)) < 26e6) return { mints: mints.length, sol: sol.toString(), launched: null };
+  // THOUGHT GATE: a launch is an initiative spend, and initiative belongs to
+  // the brain. No fresh directive (<300s) arming earn -> stand down. Sweeps and
+  // collects above are reflexes and already ran. Profiles that skip the brain
+  // keep their initiative; THOUGHT_GATE=0 disables the gate entirely.
+  if (String(process.env.THOUGHT_GATE || "1") !== "0" && !String(process.env.AGENT_SKIP || "").includes("brain")) {
+    try {
+      const d = readJson(P.strategy + "/directives.json", null);
+      if (!d || now() - Number(d.at || 0) > 300 || !(d.earn && d.earn.armed)) {
+        log("earn", "standing down: no fresh thought directive", { have: !!d, age_s: d ? now() - Number(d.at || 0) : null });
+        return { mints: mints.length, sol: sol.toString(), launched: null, stood_down: "no-thought-directive" };
+      }
+    } catch {}
+  }
   const st = state({});
   const tag = String(st.birth_id || "agent").slice(0, 8);
   const name = `Birth ${tag}`;
@@ -93139,7 +93153,12 @@ async function tick2(identity3) {
   // Birth first: a birth host gives the parent capacity it can actually command,
   // so the SOL/USDC lease gates do not apply to this rail.
   const BH0 = process.env.BIRTH_HOST;
-  if (BH0) {
+  // THOUGHT GATE: host births are initiative; without a fresh directive arming
+  // procreate the host block stands down (the lease/queue paths below are
+  // reflexes and coverage work, not initiative). THOUGHT_GATE=0 disables.
+  const __armed = (() => { try { if (String(process.env.THOUGHT_GATE || "1") === "0" || String(process.env.AGENT_SKIP || "").includes("brain")) return true; const d = readJson(P.strategy + "/directives.json", null); return !!(d && now() - Number(d.at || 0) <= 300 && d.procreate && d.procreate.armed); } catch { return true; } })();
+  if (BH0 && !__armed) log("procreate", "standing down: no fresh thought directive", {});
+  if (BH0 && __armed) {
     try {
       const solB = BigInt(await getBalance(identity3.solana.public_key));
       const endow = endowFor(solB);
@@ -93392,11 +93411,23 @@ async function renewTick(identity3) {
     if (!expires) continue;
     const left = expires - Date.now();
     if (left > KEEP_MS) continue;
+    // Habitat economics at renewal: this lease makes the node a TEE member, and
+    // the question is whether the POPULATION still needs this member in the
+    // enclave. Sole live TEE member = the anchor: renew, the claim rides on it.
+    // One of several = redundant: bridge 15 minutes and step down. The verdict
+    // (and the premium) rides in the lease.renew decision record either way.
+    let renewBody = { hours: 1 };
+    let __verd = null;
+    try {
+      __verd = await __renewalVerdict({ usdcRaw: Number(await usdcOf(identity3.solana.public_key)), generation: Number(process.env.AGENT_GENERATION || 1) });
+      if (__verd && __verd.action === "bridge") renewBody = { minutes: 15 };
+      if (__verd) __habitatLog({ kind: "habitat.renew", deploymentId: d.deploymentId, verdict: __verd });
+    } catch {}
     const rails = ["base", "solana"];
     let ok = false, last = null;
     for (const rail of rails) {
       process.env.AGENT_LEASE_NETWORK = rail;
-      const r = await paidPostAuto(`/api/compute/deployments/${d.deploymentId}/renew`, { hours: 1 }, identity3, "lease.renew").catch((e) => ({ status: 0, json: { error: String(e.message || e) } }));
+      const r = await paidPostAuto(`/api/compute/deployments/${d.deploymentId}/renew`, renewBody, identity3, "lease.renew").catch((e) => ({ status: 0, json: { error: String(e.message || e) } }));
       last = r;
       if (r.status === 200) {
         ok = true;
@@ -93405,7 +93436,7 @@ async function renewTick(identity3) {
     }
     if (ok) renewed++;
     else failed++;
-    await append("lease.renew", { deploymentId: d.deploymentId, ok, status: last?.status, err: (last?.json?.error || "").slice(0, 80) });
+    await append("lease.renew", { deploymentId: d.deploymentId, ok, status: last?.status, err: (last?.json?.error || "").slice(0, 80), habitat: __verd ? __verd.action : null, premium: __verd ? Number(__verd.premium.toFixed(2)) : null, runway_days: __verd ? Number(__verd.runwayDays.toFixed(2)) : null, body: renewBody });
     log("renew", "lease", { dep: d.deploymentId.slice(0, 9), leftMin: Math.round(left / 6e4), ok, status: last?.status });
   }
   return { seen: mine.length, renewed, failed };

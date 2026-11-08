@@ -90510,6 +90510,19 @@ async function tick(identity2) {
   }
   const sol = BigInt(await getBalance(identity2.solana.public_key));
   if (mints.length >= MAX_MINTS || sol < minLaunchLamports() || BigInt(Number(sol)) < 26e6) return { mints: mints.length, sol: sol.toString(), launched: null };
+  // THOUGHT GATE: a launch is an initiative spend, and initiative belongs to
+  // the brain. No fresh directive (<300s) arming earn -> stand down. Sweeps and
+  // collects above are reflexes and already ran. Profiles that skip the brain
+  // keep their initiative; THOUGHT_GATE=0 disables the gate entirely.
+  if (String(process.env.THOUGHT_GATE || "1") !== "0" && !String(process.env.AGENT_SKIP || "").includes("brain")) {
+    try {
+      const d = readJson(P.strategy + "/directives.json", null);
+      if (!d || now() - Number(d.at || 0) > 300 || !(d.earn && d.earn.armed)) {
+        log("earn", "standing down: no fresh thought directive", { have: !!d, age_s: d ? now() - Number(d.at || 0) : null });
+        return { mints: mints.length, sol: sol.toString(), launched: null, stood_down: "no-thought-directive" };
+      }
+    } catch {}
+  }
   const st = state({});
   const tag = String(st.birth_id || "agent").slice(0, 8);
   const name = `Birth ${tag}`;

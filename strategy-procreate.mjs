@@ -1,4 +1,5 @@
 import { createRequire as __cr } from 'module'; import { fileURLToPath as __fp } from 'url'; const require = __cr(import.meta.url); const __filename = __fp(import.meta.url); const __dirname = __filename.replace(/[\/][^\/]*$/, '');
+import { chooseHabitat as __chooseHabitat, habitatLog as __habitatLog } from "./habitat.mjs";
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -36373,7 +36374,7 @@ function compose() {
 }
 // Births prefer a TEE: lease a Phala dstack CVM and run the agent image inside it,
 // with the guest socket mounted so the child attests itself on boot.
-async function leaseTeeChild(identity2, parentBirth) {
+async function leaseTeeChild(identity2, parentBirth, hoursWanted, priceUsd) {
   const compose = [
     "services:",
     "  agent:",
@@ -36397,11 +36398,14 @@ async function leaseTeeChild(identity2, parentBirth) {
     "      - BIRTH_HOSTS=" + (process.env.BIRTH_HOSTS || "http://207.148.20.113:9098"),
     "      - PROCREATE_ENDOW_MIN_LAMPORTS=20000000",
     "      - PROCREATE_MIN_USDC_RAW=120000",
+    "      - HABITAT_CLASS=tee",
+    "      - HABITAT_PRICE_USD=" + (priceUsd || ""),
+    "      - HABITAT_DECISION=population-coverage-anchor",
     "    entrypoint: [\"sh\",\"-c\"]",
     "    command: [\"rm -f /var/lib/agent/supervisor.lock; exec /app/start.sh\"]",
     ""
   ].join("\n");
-  const body = JSON.stringify({ plan: "compute.standard", hours: Number(process.env.PROCREATE_LEASE_HOURS || 6), name: "kid-" + String(parentBirth || "gen1").slice(0, 8), compose });
+  const body = JSON.stringify({ plan: "compute.standard", hours: Number(hoursWanted || process.env.PROCREATE_LEASE_HOURS || 6), name: "kid-" + String(parentBirth || "gen1").slice(0, 8), compose });
   const post = (h = {}) => fetch(API + "/api/compute/deployments", { method: "POST", headers: { "content-type": "application/json", ...h }, body });
   let r = await post();
   let j = await r.json().catch(() => ({}));
@@ -36420,7 +36424,14 @@ async function tick(identity2) {
   const b = load();
   // Birth first on a host we command; the lease gates below do not apply to this rail.
   // TEE first: a child born in a confidential VM is the preferred birth.
-  if (String(process.env.PROCREATE_PREFER_TEE || "1") === "1") {
+  // Habitat economics: unpeekable/unfuckwithable is a quality of the POPULATION,
+  // not of a given member. If no live TEE member exists, this birth is the anchor
+  // and TEE is a requirement, priced at the cheapest TEE rail. If coverage already
+  // exists, the member is fungible and falls through to the cheap birth hosts —
+  // its security is inherited from the anchor through the signed birth chain.
+  const __hab = await __chooseHabitat({ usdcRaw: Number(await usdcOf(identity2.solana.public_key).catch(() => 0)), generation: Number(process.env.AGENT_GENERATION || 1) + 1, desiredHours: Number(process.env.PROCREATE_LEASE_HOURS || 6) }).catch(() => null);
+  if (__hab) { try { __habitatLog({ kind: "habitat.birth", generation: Number(process.env.AGENT_GENERATION || 1) + 1, decision: __hab }); } catch {} }
+  if (String(process.env.PROCREATE_PREFER_TEE || "1") === "1" && __hab && __hab.class === "tee") {
     try {
       // A lease is paid in USDC; it does not require SOL endowment. Gating it on SOL balance
       // was why agents with 4.8 USDC sat at "skipped: resources" forever.
@@ -36430,7 +36441,7 @@ async function tick(identity2) {
       const solGate = BigInt(await getBalance(identity2.solana.public_key));
       if (Number(usdcT) >= Number(process.env.PROCREATE_MIN_USDC_RAW || 120000) && solGate > endowFor(solGate) + 6000000n) {
         const parentBirth = (readJson(P.anchor, {}) || {}).birth_id || null;
-        const j = await leaseTeeChild(identity2, parentBirth);
+        const j = await leaseTeeChild(identity2, parentBirth, __hab && __hab.hours, __hab && __hab.price);
         // A child with no money is born dead: resolve its endpoint, fund it from the parent, register it.
         let childEp = j.endpoint || null;
         const resolveEp = async () => {
@@ -36471,6 +36482,20 @@ async function tick(identity2) {
         return { kids: b.children.length, leased: j.deploymentId, rail: "tee" };
       }
     } catch (e) { log("procreate", "tee lease failed", { err: String(e.message || e).slice(0, 120) }); }
+  }
+  // THOUGHT GATE: host births are initiative and wait for a fresh directive
+  // arming procreate. The TEE path above is the population-coverage reflex and
+  // is deliberately NOT gated: an uncovered population re-anchors whether or
+  // not the brain is awake. THOUGHT_GATE=0 disables; brain-less profiles keep
+  // their initiative.
+  if (String(process.env.THOUGHT_GATE || "1") !== "0" && !String(process.env.AGENT_SKIP || "").includes("brain")) {
+    try {
+      const d = readJson(P.strategy + "/directives.json", null);
+      if (!d || now() - Number(d.at || 0) > 300 || !(d.procreate && d.procreate.armed)) {
+        log("procreate", "standing down: no fresh thought directive", { have: !!d });
+        return { kids: b.children.length, stood_down: "no-thought-directive" };
+      }
+    } catch {}
   }
   // A birth host is a convenience, not a chokepoint: try every host we know until one answers.
   const BHS = String(process.env.BIRTH_HOSTS || process.env.BIRTH_HOST || "").split(",").map((x) => x.trim()).filter(Boolean);
