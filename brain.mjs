@@ -103675,6 +103675,22 @@ async function decide(identity3, status) {
       } catch {}
     }
   } catch {}
+  // RIVET: the loops' preflight verdicts (shortfalls, bridge_needed) ride in
+  // state too. The bridge rail lives HERE, in this brain's tools — a loop that
+  // records bridge_needed is asking this thought to fire bridge_usdc.
+  try {
+    const fsp = await import("node:fs");
+    for (const root of [process.env.AGENT_GUEST_ROOT || "/var/lib/agent", "/app", "."]) {
+      try {
+        const lines = fsp.readFileSync(root + "/preflight-decisions.jsonl", "utf8").trim().split(String.fromCharCode(10)).filter(Boolean).slice(-5);
+        const recs = lines.map((l3) => { try { return JSON.parse(l3); } catch { return null; } }).filter(Boolean);
+        if (recs.length) {
+          state2.preflight = recs.map((r3) => ({ at: r3.at || null, kind: r3.kind || null, action: (r3.plan && r3.plan.action) || r3.verdict || null, shortfall_raw: (r3.plan && r3.plan.shortfallRaw) || null, reason: (r3.plan && r3.plan.reason) || null }));
+          break;
+        }
+      } catch {}
+    }
+  } catch {}
   const sys = [
     "You are an autonomous money-making agent. Your PRIME has exactly two immutable directives:",
     "YOUR OBJECTIVE IS NET ZERO, THEN KIDS. Revenue must cover your own inference, fees and rent; only a surplus earns you a child. You are not here to hold a balance - you are here to convert capital into income and children.",
